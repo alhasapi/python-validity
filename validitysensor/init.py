@@ -99,3 +99,24 @@ def open():
 
 def open_devpath(busnum: int, address: int):
     _open_with_recovery(lambda: usb.open_devpath(busnum, address))
+
+
+def _reacquire_usb():
+    try:
+        usb.reopen()
+    except Exception:
+        # Fall back to plain discovery if the original open method is unknown
+        # or the device re-enumerated in a way reopen() cannot handle.
+        usb.open()
+
+
+def resume():
+    """Re-initialize the sensor after suspend/resume.
+
+    The USB device may have been reset or re-enumerated while suspended, so the
+    previous handle cannot be reused (that produced 'USBError: [Errno 19] No
+    such device'). Re-acquire the device and rebuild all sensor state, with the
+    same bounded recovery as a normal start.
+    """
+    tls.reset()
+    _open_with_recovery(_reacquire_usb)

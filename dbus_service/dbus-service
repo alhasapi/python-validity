@@ -71,11 +71,9 @@ class Device(dbus.service.Object):
     @dbus.service.method(dbus_interface=INTERFACE_NAME, in_signature='', out_signature='')
     def Resume(self):
         logging.debug('In Resume')
-        tls.reset()
-        try:
-            init.open_common()
-        except:
-            init.open_common()
+        # Re-acquire the USB device and rebuild sensor state; open_common() alone
+        # reuses a stale handle after the device re-enumerates (see #249).
+        init.resume()
 
     @dbus.service.method(dbus_interface=INTERFACE_NAME, in_signature="s", out_signature="as")
     def ListEnrolledFingers(self, user):
