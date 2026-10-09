@@ -1,5 +1,7 @@
 import atexit
 import logging
+import time
+import typing
 
 from validitysensor.init_data_dir import init_data_dir
 from validitysensor.flash import read_tls_flash
@@ -9,6 +11,14 @@ from validitysensor.sensor import sensor, reboot, RebootException
 from validitysensor.tls import tls
 from validitysensor.upload_fwext import upload_fwext
 from validitysensor.usb import usb
+
+# Bounded initialization recovery: the sensor can be left unresponsive after a
+# reboot or resume. Reset/re-open the USB device a few times before giving up,
+# so a stuck sensor recovers instead of crash-looping.
+INIT_ATTEMPTS = 5
+INIT_RETRY_DELAY = 1.0
+
+_close_registered = False
 
 
 def close():
@@ -44,15 +54,48 @@ def open_common():
     #
     # Don't attempt to autoreboot unless we finished initializing the sensor successfully.
     # Otherwise if there is a bug in initialization, we may end up in a loop constantly rebooting the device.
-    atexit.register(close)
+    global _close_registered
+    if not _close_registered:
+        atexit.register(close)
+        _close_registered = True
     logging.debug('atexit registered')
 
 
+def _open_with_recovery(opener: typing.Callable[[], None]):
+    """Open the device and initialize the sensor, with bounded recovery.
+
+    On failure the USB device is reset and re-opened before the next attempt.
+    This breaks the infinite restart loop seen when the sensor stops answering
+    commands (USBTimeoutError) and was never reset because a failed init never
+    reached the atexit handler that performs usb.close().
+    """
+    last_exc: typing.Optional[Exception] = None
+    for attempt in range(1, INIT_ATTEMPTS + 1):
+        try:
+            opener()
+            open_common()
+            return
+        except RebootException:
+            # Normal exit: the sensor reboots and udev starts the service again.
+            raise
+        except Exception as e:
+            last_exc = e
+            logging.warning('Sensor initialization attempt %d/%d failed: %s: %s', attempt,
+                            INIT_ATTEMPTS, type(e).__name__, e)
+            if attempt == INIT_ATTEMPTS:
+                break
+            try:
+                usb.reopen()
+            except Exception as reopen_exc:
+                logging.debug('Could not reopen USB device: %s', reopen_exc)
+            time.sleep(INIT_RETRY_DELAY)
+
+    raise last_exc
+
+
 def open():
-    usb.open()
-    open_common()
+    _open_with_recovery(usb.open)
 
 
 def open_devpath(busnum: int, address: int):
-    usb.open_devpath(busnum, address)
-    open_common()
+    _open_with_recovery(lambda: usb.open_devpath(busnum, address))

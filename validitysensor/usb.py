@@ -48,6 +48,8 @@ class Usb:
         self.trace_enabled = False
         self.dev: typing.Optional[ucore.Device] = None
         self.cancel = False
+        # Callable that re-opens the device the way it was opened originally.
+        self._reopen_fn: typing.Optional[typing.Callable[[], None]] = None
 
     def open(self, vendor=None, product=None):
         if vendor is not None and product is not None:
@@ -60,6 +62,7 @@ class Usb:
             dev = ucore.find(custom_match=match)
 
         self.open_dev(dev)
+        self._reopen_fn = lambda: self.open(vendor, product)
 
     def open_devpath(self, busnum: int, address: int):
         def match(d):
@@ -68,14 +71,36 @@ class Usb:
         dev = ucore.find(custom_match=match)
 
         self.open_dev(dev)
+        self._reopen_fn = lambda: self.open_devpath(busnum, address)
 
     def open_dev(self, dev: ucore.Device):
         if dev is None:
-            raise Exception('No matching devices found')
+            raise USBError('No matching devices found')
 
         self.dev = dev
         self.dev.default_timeout = 15000
         dev.set_configuration()
+
+    def reset(self):
+        """Reset the USB device without sending the sensor reboot command."""
+        if self.dev is not None:
+            try:
+                self.dev.reset()
+            except Exception:
+                pass
+
+    def reopen(self):
+        """Reset and re-open the device the way it was originally opened.
+
+        Used to recover a sensor that stopped responding to commands. The
+        device may re-enumerate at a different USB address, so discovery is
+        repeated instead of reusing the stale handle.
+        """
+        self.reset()
+        self.dev = None
+        if self._reopen_fn is None:
+            raise Exception('USB device was never opened; cannot reopen')
+        self._reopen_fn()
 
     def close(self):
         if self.dev is not None:
