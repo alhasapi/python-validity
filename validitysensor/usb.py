@@ -1,5 +1,6 @@
 import errno
 import logging
+import time
 import typing
 from binascii import hexlify, unhexlify
 from enum import Enum
@@ -25,6 +26,17 @@ class SupportedDevices(Enum):
 
 
 supported_devices = dict((dev.value, dev) for dev in SupportedDevices)
+
+# Status words the sensor may return while it is still settling after a
+# wake-up or a reset. They are transient, so the command should be retried
+# instead of being treated as a hard failure by assert_status().
+BUSY_STATUSES = (0x0104, 0x0401)
+
+# Retry budget for a single command: 20 * 0.5s = 10s on top of the 15s USB
+# timeout. Bounded so a genuinely stuck sensor still fails fast enough for the
+# init recovery loop to reset it.
+CMD_RETRY_ATTEMPTS = 20
+CMD_RETRY_DELAY = 0.5
 
 
 class CancelledException(Exception):
@@ -76,18 +88,55 @@ class Usb:
     def usb_dev(self):
         return self.dev
 
+    def cmd_retry_busy(self, out: typing.Union[bytes, typing.Callable[[], bytes]]):
+        """Run a command, retrying while the sensor reports a transient busy
+        status (or times out). Returns the last response.
+        """
+        if callable(out):
+            out = out()
+            if not out:
+                return 0
+
+        rsp: typing.Union[bytes, int] = 0
+        for attempt in range(CMD_RETRY_ATTEMPTS):
+            last_attempt = attempt + 1 == CMD_RETRY_ATTEMPTS
+            try:
+                rsp = self.cmd(out)
+            except USBError as e:
+                if e.errno == errno.ETIMEDOUT and not last_attempt:
+                    time.sleep(CMD_RETRY_DELAY)
+                    continue
+                raise
+
+            if not isinstance(rsp, (bytes, bytearray)) or len(rsp) < 2:
+                return rsp
+
+            status, = unpack('<H', rsp[:2])
+            if status in BUSY_STATUSES and not last_attempt:
+                time.sleep(CMD_RETRY_DELAY)
+                continue
+
+            return rsp
+
+        return rsp
+
     def send_init(self):
         # self.dev.set_configuration()
 
         # TODO analyse responses, detect hardware type
-        assert_status(self.cmd(unhexlify('01')))  # RomInfo.get()
+        # The first command after wake-up/reset can return a transient busy
+        # status (0x0104/0x0401); retry it before asserting.
+        assert_status(self.cmd_retry_busy(unhexlify('01')))  # RomInfo.get()
         assert_status(self.cmd(unhexlify('19')))
 
         # 43 -- get partition header(?) (02 -- fwext partition)
         # c28c745a in response is a FwextBuildtime = 0x5A748CC2
-        rsp = self.cmd(unhexlify('4302'))  # get_fw_info()
+        rsp = self.cmd_retry_busy(unhexlify('4302'))  # get_fw_info()
 
-        assert_status(self.cmd(init_hardcoded))
+        # init_hardcoded returns a non-zero status when no firmware is loaded
+        # yet; that is a normal state which the check below handles, so do not
+        # assert on it.
+        self.cmd_retry_busy(init_hardcoded)
 
         (err, ), rsp = unpack('<H', rsp[:2]), rsp[2:]
         if err != 0:
