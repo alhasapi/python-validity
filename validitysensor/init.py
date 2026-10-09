@@ -32,6 +32,10 @@ def close():
             reboot()
         except RebootException:
             pass
+        except Exception as e:
+            # The device can already be gone/reset during shutdown or suspend;
+            # this is expected and must not print a traceback from atexit.
+            logging.debug('atexit: reboot failed: %s', e)
         finally:
             usb.close()
 

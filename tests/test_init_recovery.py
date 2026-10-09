@@ -89,3 +89,46 @@ def test_open_common_loads_firmware_before_flash(monkeypatch):
 
     assert order.index('send_init') < order.index('init_flash')
     assert order[-1] == 'init_db'
+
+
+def test_close_ignores_unexpected_reboot_errors(monkeypatch):
+    events = []
+
+    class FakeUsb:
+        dev = object()
+
+        def close(self):
+            events.append('close')
+
+    monkeypatch.setattr(init, 'usb', FakeUsb())
+
+    def failing_reboot():
+        raise RuntimeError('device already gone')
+
+    monkeypatch.setattr(init, 'reboot', failing_reboot)
+
+    # Must not propagate: this runs from atexit during shutdown/suspend.
+    init.close()
+
+    assert events == ['close']
+
+
+def test_close_handles_reboot_exception(monkeypatch):
+    events = []
+
+    class FakeUsb:
+        dev = object()
+
+        def close(self):
+            events.append('close')
+
+    monkeypatch.setattr(init, 'usb', FakeUsb())
+
+    def reboot_exc():
+        raise init.RebootException()
+
+    monkeypatch.setattr(init, 'reboot', reboot_exc)
+
+    init.close()
+
+    assert events == ['close']
