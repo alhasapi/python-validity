@@ -28,8 +28,11 @@ def close():
 
 def open_common():
     init_data_dir()
-    init_flash()
+    # Load the hardcoded init/firmware blobs before touching the protected
+    # flash. On 06cb:009a the flash commands time out when send_init() runs
+    # after init_flash() (see uunicorn/python-validity#272).
     usb.send_init()
+    init_flash()
     tls.parse_tls_flash(read_tls_flash())
     tls.open()
     upload_fwext()
